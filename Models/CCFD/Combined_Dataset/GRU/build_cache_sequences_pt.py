@@ -6,9 +6,9 @@ import torch
 # =======================================================
 # CONFIG
 # =======================================================
-CSV_PATH = r"/home/ducanhhh/Fraud-detection-in-credit-card/Credit Card Fraud Detection/Datasets/combined_data.csv"
+CSV_PATH = r"TranVanCuong/Datasets/combined_data.csv"
 SAVE_PATH = r"seq_cache.pt"
-MEMORY_SIZE = 100
+MEMORY_SIZE = 2000
 
 np.random.seed(42)
 

@@ -210,8 +210,11 @@ def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_c
     best_loss = float("inf")
     patience = 8
     bad_epochs = 0
-    best_test_info = None 
+
+    best_test_info = None
     best_score_track = -1.0
+    best_epoch = -1
+
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
@@ -239,9 +242,12 @@ def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_c
         te = evaluate_model_cpu_metrics(model, X_test_cpu,  y_test_cpu)
         print(f"Train - Th:{tr[0]:.2f} F1:{tr[1]:.4f} AUC:{tr[2]:.4f} Comb:{tr[3]:.4f} Acc:{tr[4]:.4f} Prec:{tr[5]:.4f} Rec:{tr[6]:.4f}")
         print(f"Test  - Th:{te[0]:.2f} F1:{te[1]:.4f} AUC:{te[2]:.4f} Comb:{te[3]:.4f} Acc:{te[4]:.4f} Prec:{te[5]:.4f} Rec:{te[6]:.4f}")
+
         if te[3] > best_score_track:
             best_score_track = te[3]
-            best_test_info = te # Lưu lại tuple kết quả test
+            best_test_info = te
+            best_epoch = epoch + 1  # 1-based
+
         if avg_loss < best_loss:
             best_loss = avg_loss
             bad_epochs = 0
@@ -250,8 +256,11 @@ def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_c
             if bad_epochs >= patience:
                 print("Early stopping.")
                 break
-    return best_test_info
 
+    return best_test_info, best_epoch
+
+import json
+from datetime import datetime
 
 if __name__ == "__main__":
     input_size = X_train_seq.shape[2]
@@ -264,7 +273,7 @@ if __name__ == "__main__":
 
     start = time.perf_counter()
 
-    best_results = train_model_from_cache(
+    best_results, best_epoch = train_model_from_cache(
         model,
         X_train_seq, y_train_seq,
         X_test_seq,  y_test_seq,
@@ -273,8 +282,46 @@ if __name__ == "__main__":
         batch_size=256
     )
 
-    print(f"\nTraining finished in {time.perf_counter() - start:.2f}s")
-    if best_results is not None:
-            print(f"\n>>> BEST TEST RESULT: Th:{best_results[0]:.2f} | F1: {best_results[1]:.4f} | AUC: {best_results[2]:.4f} | Comb: {best_results[3]:.4f} | Acc: {best_results[4]:.4f}")
+    elapsed_s = time.perf_counter() - start
+    print(f"\nTraining finished in {elapsed_s:.2f}s")
+
+    # Save model
     torch.save(model.state_dict(), "fraudgru_from_cache.pth")
     print("→ Saved model state_dict to fraudgru_from_cache.pth")
+
+    # Save best result to file
+    run_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result_path = "best_test_result.json"
+
+    payload = {
+        "finished_at": run_time_str,
+        "elapsed_seconds": float(elapsed_s),
+        "best_epoch": int(best_epoch),
+        "best_test": None if best_results is None else {
+            "threshold": float(best_results[0]),
+            "f1": float(best_results[1]),
+            "auc": float(best_results[2]),
+            "comb": float(best_results[3]),
+            "acc": float(best_results[4]),
+            "precision": float(best_results[5]),
+            "recall": float(best_results[6]),
+        },
+        "cache_path": CACHE_PATH,
+        "model_path": "fraudgru_from_cache.pth",
+        "hidden_size": hidden_size,
+        "num_layers": num_layers,
+        "input_size": int(input_size),
+    }
+
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(f"→ Saved best results to {result_path}")
+
+    if best_results is not None:
+        print(
+            f"\n>>> BEST TEST RESULT (epoch {best_epoch}): "
+            f"Th:{best_results[0]:.2f} | F1:{best_results[1]:.4f} | "
+            f"AUC:{best_results[2]:.4f} | Comb:{best_results[3]:.4f} | "
+            f"Acc:{best_results[4]:.4f}"
+        )
