@@ -1,0 +1,58 @@
+16/5/2025:
+GRU:
+Test Metrics  - Best Threshold: 0.60, F1: 0.9666, AUC: 0.9996, Combined: 0.9831, Accuracy: 0.9993, Precision: 0.9626, Recall: 0.9706
+LSTM:
+Test Metrics  - Threshold: 0.40, F1: 0.9679, AUC: 0.9986, Combined: 0.9833, Accuracy: 0.9994, Precision: 0.9792, Recall: 0.9569
+Shift_GRU:
+Test Metrics  - Best Threshold: 0.80, F1: 0.9749, AUC: 0.9994, Combined: 0.9871, Accuracy: 0.9995, Precision: 0.9848, Recall: 0.9652
+17/5/2025:
+Shift_LSTM:
+Test Metrics  - Best Threshold: 0.50, F1: 0.9770, AUC: 0.9998, Combined: 0.9884, Accuracy: 0.9995, Precision: 0.9865, Recall: 0.9677
+19/5/2025:
+THLSTM:
+Test Metrics  - Best Threshold: 0.70, F1: 0.9690, AUC: 0.9982, Combined: 0.9836, Accuracy: 0.9994, Precision: 0.9854, Recall: 0.9532
+STAN:
+Test Metrics  - Best Threshold: 0.50, F1: 0.9443, AUC: 0.9989, Combined: 0.9716, Accuracy: 0.9989, Precision: 0.9654, Recall: 0.9242
+23/5/2025:
+Logistic Regression Test - Best Threshold: 0.1000
+Logistic Regression Test - Best Accuracy: 0.9888
+Logistic Regression Test - Best Precision: 0.4927
+Logistic Regression Test - Best Recall: 0.3943
+Logistic Regression Test - Best F1 Score: 0.4380
+Logistic Regression Test - Best ROC_AUC Score: 0.8688
+KNN Test - Best Threshold: 0.2000
+KNN Test - Best Accuracy: 0.9891
+KNN Test - Best Precision: 0.5073
+KNN Test - Best Recall: 0.5356
+KNN Test - Best F1 Score: 0.5211
+KNN Test - Best ROC_AUC Score: 0.8335
+Decision Tree Test - Best Threshold: 0.5000
+Decision Tree Test - Best Accuracy: 0.9865
+Decision Tree Test - Best Precision: 0.3949
+Decision Tree Test - Best Recall: 0.4094
+Decision Tree Test - Best F1 Score: 0.4020
+Decision Tree Test - Best ROC_AUC Score: 0.7013
+LightGBM Test - Best Threshold: 0.3000
+LightGBM Test - Best Accuracy: 0.9902
+LightGBM Test - Best Precision: 0.5649
+LightGBM Test - Best Recall: 0.5039
+LightGBM Test - Best F1 Score: 0.5326
+LightGBM Test - Best ROC_AUC Score: 0.9724
+Random Forest Test - Best Threshold: 0.4000
+Random Forest Test - Best Accuracy: 0.9904
+Random Forest Test - Best Precision: 0.5816
+Random Forest Test - Best Recall: 0.4657
+Random Forest Test - Best F1 Score: 0.5173
+Random Forest Test - Best ROC_AUC Score: 0.8996
+CatBoost Test - Best Threshold: 0.3000
+CatBoost Test - Best Accuracy: 0.9900
+CatBoost Test - Best Precision: 0.5510
+CatBoost Test - Best Recall: 0.5132
+CatBoost Test - Best F1 Score: 0.5314
+CatBoost Test - Best ROC_AUC Score: 0.9725
+XGBoost Test - Best Threshold: 0.3000
+XGBoost Test - Best Accuracy: 0.9901
+XGBoost Test - Best Precision: 0.5586
+XGBoost Test - Best Recall: 0.5099
+XGBoost Test - Best F1 Score: 0.5331
+XGBoost Test - Best ROC_AUC Score: 0.9728

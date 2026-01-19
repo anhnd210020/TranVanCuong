@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Env
+.venv/
+venv/
+env/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Dataset / big files (KHONG push)
+Datasets/
+*.csv
+
+# Model weights / cache (KHONG push)
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.joblib
+*.h5
+
+# Output folders
+runs/
+wandb/
+outputs/
+checkpoints/
+logs/
