@@ -17,60 +17,64 @@ torch.set_float32_matmul_precision("high")
 # =========================
 # LOAD CACHE
 # =========================
-CACHE_PATH = "/home/ducanhhh/Fraud-detection-in-credit-card/seq_cache.pt"   # hoặc đường dẫn full nếu bạn để chỗ khác
+from torch.utils.data import Dataset, DataLoader
+
+CACHE_PATH = "TranVanCuong/seq_cache.pt"
 cache = torch.load(CACHE_PATH, map_location="cpu")
 
-X_train_seq = cache["X_train_seq"]   # CPU tensor
-y_train_seq = cache["y_train_seq"]   # CPU tensor
-X_test_seq  = cache["X_test_seq"]    # CPU tensor
-y_test_seq  = cache["y_test_seq"]    # CPU tensor
-
 feature_cols = cache["feature_cols"]
-memory_size  = cache["memory_size"]
+memory_size  = int(cache["memory_size"])
+
+X_train_users = cache["X_train_users"]
+y_train_users = cache["y_train_users"]
+train_idx_user = cache["train_idx_user"].numpy()
+train_idx_pos  = cache["train_idx_pos"].numpy()
+
+X_test_users = cache["X_test_users"]
+y_test_users = cache["y_test_users"]
+test_idx_user = cache["test_idx_user"].numpy()
+test_idx_pos  = cache["test_idx_pos"].numpy()
 
 print("Loaded cache:", CACHE_PATH)
-print("Train seq:", tuple(X_train_seq.shape))
-print("Test  seq:", tuple(X_test_seq.shape))
 print("memory_size:", memory_size)
-print("num_features:", X_train_seq.shape[2])
-
-# =========================
-# Loss (GIỮ Y HỆT BASELINE)
-# =========================
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2, reduction='none'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
-        pt = torch.where(targets == 1, inputs, 1 - inputs)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        return focal_loss
+print("num_features:", X_train_users[0].shape[1])
+print("train samples:", len(train_idx_user))
+print("test  samples:", len(test_idx_user))
 
 
-class CombinedLossUnc(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2):
-        super().__init__()
-        self.focal = FocalLoss(alpha, gamma, reduction='mean')
-        self.log_sigma_bce = nn.Parameter(torch.zeros(1))
-        self.log_sigma_focal = nn.Parameter(torch.zeros(1))
+class WindowDataset(Dataset):
+    def __init__(self, X_list, y_list, idx_user, idx_pos, memory_size, pad_mode="repeat_first"):
+        self.X_list = X_list
+        self.y_list = y_list
+        self.idx_user = idx_user
+        self.idx_pos = idx_pos
+        self.M = memory_size
+        assert pad_mode in ["repeat_first", "zeros"]
+        self.pad_mode = pad_mode
+        self.F = X_list[0].shape[1]
 
-    def forward(self, inputs, targets):
-        bce = F.binary_cross_entropy(inputs, targets, reduction='mean')
-        focal = self.focal(inputs, targets)
-        loss = (
-            0.5 * torch.exp(-self.log_sigma_bce) * bce + 0.5 * self.log_sigma_bce
-            + 0.5 * torch.exp(-self.log_sigma_focal) * focal + 0.5 * self.log_sigma_focal
-        )
-        return loss
+    def __len__(self):
+        return len(self.idx_user)
+
+    def __getitem__(self, i):
+        u = int(self.idx_user[i])
+        t = int(self.idx_pos[i])
+        X_u = self.X_list[u]  # [n_i, F] (float16 hoặc float32)
+        y_u = self.y_list[u]  # [n_i] float32
+
+        start = t - self.M + 1
+        if start >= 0:
+            seq = X_u[start:t+1]  # [M, F]
+        else:
+            need = -start
+            if self.pad_mode == "repeat_first":
+                pad_row = X_u[0:1].expand(need, -1)
+            else:
+                pad_row = torch.zeros((need, self.F), dtype=X_u.dtype)
+            seq = torch.cat([pad_row, X_u[0:t+1]], dim=0)
+
+        label = y_u[t]
+        return seq, label  # giữ dtype của seq, label float32
 
 # =========================
 # Shift-GCN (GIỮ NGUYÊN)
@@ -149,35 +153,44 @@ class FraudGRU(nn.Module):
         self.shift_gcn = Shift_gcn(in_channels=input_size, out_channels=hidden_size, num_nodes=1)
         self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
-        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = x.unsqueeze(2)  # (B, seq, 1, F)
         x = self.shift_gcn(x)
         x = x.squeeze(3).permute(0, 2, 1)  # (B, seq, hidden)
         out, _ = self.gru(x)
-        out = self.fc(out[:, -1, :])
-        return self.sigmoid(out).squeeze(-1)
+        logits = self.fc(out[:, -1, :]).squeeze(-1)  # (B,)
+        return logits
 
-# =========================
-# CPU batch iterator + GPU copy
-# =========================
-def iterate_minibatches_cpu(X, y, batch_size, shuffle=True):
-    N = X.size(0)
-    idx = torch.randperm(N) if shuffle else torch.arange(N)
-    for i in range(0, N, batch_size):
-        j = idx[i:i+batch_size]
-        yield X[j], y[j]
+
+def make_loaders(batch_size=256, num_workers=4):
+    train_ds = WindowDataset(X_train_users, y_train_users, train_idx_user, train_idx_pos, memory_size)
+    test_ds  = WindowDataset(X_test_users,  y_test_users,  test_idx_user,  test_idx_pos,  memory_size)
+
+    persistent = (num_workers > 0)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=persistent
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=512, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=persistent
+    )
+    return train_loader, test_loader
 
 @torch.no_grad()
-def evaluate_model_cpu_metrics(model, X_cpu, y_cpu, batch_size=4096):
+def evaluate_model_loader_metrics(model, loader):
     model.eval()
-    preds = []
-    targets = []
+    preds, targets = [], []
 
-    for Xb_cpu, yb_cpu in iterate_minibatches_cpu(X_cpu, y_cpu, batch_size, shuffle=False):
-        Xb = Xb_cpu.to(device, non_blocking=True)
-        out = model(Xb).detach().cpu().numpy()
+    for Xb_cpu, yb_cpu in loader:
+        Xb = Xb_cpu.to(device, non_blocking=True).float()
+        yb = yb_cpu.to(device, non_blocking=True).float()
+        logits = model(Xb)
+        out = torch.sigmoid(logits).detach().cpu().numpy()
         preds.extend(out.tolist())
         targets.extend(yb_cpu.numpy().tolist())
 
@@ -202,11 +215,11 @@ def evaluate_model_cpu_metrics(model, X_cpu, y_cpu, batch_size=4096):
     rec  = TP / max(1, (TP+FN))
     return best_th, best_f1, auc, (best_f1+auc)/2, acc, prec, rec
 
+
 # =========================
 # TRAIN LOOP
 # =========================
-def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_cpu,
-                          criterion, optimizer, num_epochs=50, batch_size=256):
+def train_model_from_loader(model, train_loader, test_loader, criterion, optimizer, num_epochs=50):
     best_loss = float("inf")
     patience = 8
     bad_epochs = 0
@@ -220,14 +233,14 @@ def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_c
         total_loss = 0.0
         nb = 0
 
-        for Xb_cpu, yb_cpu in iterate_minibatches_cpu(X_train_cpu, y_train_cpu, batch_size, shuffle=True):
-            Xb = Xb_cpu.to(device, non_blocking=True)
-            yb = yb_cpu.to(device, non_blocking=True)
-
+        for Xb_cpu, yb_cpu in train_loader:
+            Xb = Xb_cpu.to(device, non_blocking=True).float()
+            yb = yb_cpu.to(device, non_blocking=True).float()
             optimizer.zero_grad(set_to_none=True)
-            out = model(Xb)
-            loss = criterion(out, yb)
+            logits = model(Xb)
+            loss = criterion(logits, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += float(loss.detach().item())
@@ -235,18 +248,16 @@ def train_model_from_cache(model, X_train_cpu, y_train_cpu, X_test_cpu, y_test_c
 
         avg_loss = total_loss / max(1, nb)
         print(f"\nEpoch {epoch+1}/{num_epochs} | Loss: {avg_loss:.6f}")
-        print(f"  log_sigma_bce:   {criterion.log_sigma_bce.item():.6f}")
-        print(f"  log_sigma_focal: {criterion.log_sigma_focal.item():.6f}")
 
-        tr = evaluate_model_cpu_metrics(model, X_train_cpu, y_train_cpu)
-        te = evaluate_model_cpu_metrics(model, X_test_cpu,  y_test_cpu)
+        tr = evaluate_model_loader_metrics(model, train_loader)
+        te = evaluate_model_loader_metrics(model, test_loader)
         print(f"Train - Th:{tr[0]:.2f} F1:{tr[1]:.4f} AUC:{tr[2]:.4f} Comb:{tr[3]:.4f} Acc:{tr[4]:.4f} Prec:{tr[5]:.4f} Rec:{tr[6]:.4f}")
         print(f"Test  - Th:{te[0]:.2f} F1:{te[1]:.4f} AUC:{te[2]:.4f} Comb:{te[3]:.4f} Acc:{te[4]:.4f} Prec:{te[5]:.4f} Rec:{te[6]:.4f}")
 
         if te[3] > best_score_track:
             best_score_track = te[3]
             best_test_info = te
-            best_epoch = epoch + 1  # 1-based
+            best_epoch = epoch + 1
 
         if avg_loss < best_loss:
             best_loss = avg_loss
@@ -263,23 +274,31 @@ import json
 from datetime import datetime
 
 if __name__ == "__main__":
-    input_size = X_train_seq.shape[2]
+    input_size = X_train_users[0].shape[1]  # num_features
     hidden_size = 64
     num_layers = 2
 
     model = FraudGRU(input_size, hidden_size, num_layers).to(device)
-    criterion = CombinedLossUnc(alpha=0.25, gamma=2).to(device)
-    optimizer = optim.Adam(list(model.parameters()) + list(criterion.parameters()), lr=1e-3)
+    # pos_weight = (#neg / #pos) để cân bằng fraud (label=1)
+    pos = 0
+    neg = 0
+    for yt in y_train_users:
+        pos += int((yt == 1).sum().item())
+        neg += int((yt == 0).sum().item())
+
+    pos_weight = torch.tensor([neg / max(1, pos)], device=device, dtype=torch.float32)
+    print("pos:", pos, "neg:", neg, "pos_weight:", float(pos_weight.item()))
+
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+
+    train_loader, test_loader = make_loaders(batch_size=256, num_workers=4)
 
     start = time.perf_counter()
-
-    best_results, best_epoch = train_model_from_cache(
-        model,
-        X_train_seq, y_train_seq,
-        X_test_seq,  y_test_seq,
-        criterion, optimizer,
-        num_epochs=50,
-        batch_size=256
+    best_results, best_epoch = train_model_from_loader(
+        model, train_loader, test_loader, criterion, optimizer,
+        num_epochs=50
     )
 
     elapsed_s = time.perf_counter() - start

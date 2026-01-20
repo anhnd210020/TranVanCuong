@@ -6,7 +6,7 @@ import torch
 # =======================================================
 # CONFIG
 # =======================================================
-CSV_PATH = r"TranVanCuong/Datasets/combined_data.csv"
+CSV_PATH = r"TranVanCuong/combined_data.csv"
 SAVE_PATH = r"seq_cache.pt"
 MEMORY_SIZE = 2000
 
@@ -143,65 +143,142 @@ mean = Xtr_np.mean(axis=0, keepdims=True)
 std  = Xtr_np.std(axis=0, keepdims=True)
 std[std < 1e-6] = 1e-6
 
-# =======================================================
-# 7) CREATE SEQUENCES (CPU)
-# =======================================================
-def create_sequences_transactional_expansion_cpu(df_raw, feature_cols, memory_size, mean, std):
-    sequences = []
-    labels = []
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 
-    grouped = df_raw.groupby("cc_num")
-    for _, group in grouped:
+# =======================================================
+# 7) BUILD PER-USER ARRAYS (CPU)  + INDEX MAP
+# =======================================================
+def build_user_tensors(df_raw, feature_cols, mean, std, x_dtype=np.float32):
+    """
+    Return:
+      - user_ids: list of cc_num
+      - X_list: list of torch.Tensor [n_i, F] (scaled)
+      - y_list: list of torch.Tensor [n_i]
+      - idx_user: np.int32 array length N_total (maps global idx -> user_index)
+      - idx_pos : np.int32 array length N_total (maps global idx -> position in that user)
+    """
+    user_ids = []
+    X_list = []
+    y_list = []
+
+    idx_user = []
+    idx_pos = []
+
+    grouped = df_raw.groupby("cc_num", sort=True)
+    for u_idx, (cc, group) in enumerate(grouped):
         group = group.sort_values(by="trans_date_trans_time_numeric")
 
         X = group[feature_cols].to_numpy(np.float32, copy=True)
         y = group["is_fraud"].to_numpy(np.float32, copy=True)
 
-        # scale CPU
+        # scale
         X = (X - mean) / std
 
+        if x_dtype == np.float16:
+            X = X.astype(np.float16, copy=False)
+
+        Xt = torch.from_numpy(X)              # [n_i, F]
+        yt = torch.from_numpy(y)              # [n_i]
+
+        user_ids.append(cc)
+        X_list.append(Xt)
+        y_list.append(yt)
+
         n = len(group)
-        for i in range(n):
-            if i < memory_size:
-                pad_needed = memory_size - (i + 1)
-                pad = np.repeat(X[0:1], pad_needed, axis=0)
-                seq = np.concatenate([pad, X[:i+1]], axis=0)
+        idx_user.extend([u_idx] * n)
+        idx_pos.extend(list(range(n)))
+
+    idx_user = np.asarray(idx_user, dtype=np.int32)
+    idx_pos  = np.asarray(idx_pos, dtype=np.int32)
+    return user_ids, X_list, y_list, idx_user, idx_pos
+
+
+class WindowDataset(Dataset):
+    def __init__(self, X_list, y_list, idx_user, idx_pos, memory_size, pad_mode="repeat_first"):
+        self.X_list = X_list
+        self.y_list = y_list
+        self.idx_user = idx_user
+        self.idx_pos = idx_pos
+        self.M = memory_size
+        assert pad_mode in ["repeat_first", "zeros"]
+        self.pad_mode = pad_mode
+
+        # feature dim
+        self.F = X_list[0].shape[1]
+
+    def __len__(self):
+        return len(self.idx_user)
+
+    def __getitem__(self, i):
+        u = int(self.idx_user[i])
+        t = int(self.idx_pos[i])
+
+        X_u = self.X_list[u]     # [n_i, F]
+        y_u = self.y_list[u]     # [n_i]
+
+        start = t - self.M + 1
+        if start >= 0:
+            seq = X_u[start:t+1]  # [M, F]
+        else:
+            # need pad
+            need = -start
+            if self.pad_mode == "repeat_first":
+                pad_row = X_u[0:1].expand(need, -1)  # [need, F]
             else:
-                seq = X[i - memory_size + 1: i + 1]
+                pad_row = torch.zeros((need, self.F), dtype=X_u.dtype)
 
-            sequences.append(seq)
-            labels.append(y[i])
+            seq = torch.cat([pad_row, X_u[0:t+1]], dim=0)  # [M, F]
 
-    return np.array(sequences, dtype=np.float32), np.array(labels, dtype=np.float32)
+        label = y_u[t]
+        # return float32 for model stability
+        return seq.to(torch.float32), label.to(torch.float32)
 
-print("Building train sequences...")
-X_train_seq, y_train_seq = create_sequences_transactional_expansion_cpu(train, feature_cols, MEMORY_SIZE, mean, std)
-print("Building test sequences...")
-X_test_seq,  y_test_seq  = create_sequences_transactional_expansion_cpu(test, feature_cols, MEMORY_SIZE, mean, std)
 
-print("Train seq shape:", X_train_seq.shape)
-print("Test  seq shape:", X_test_seq.shape)
+print("Building per-user train tensors...")
+train_user_ids, X_train_users, y_train_users, train_idx_user, train_idx_pos = build_user_tensors(
+    train, feature_cols, mean, std, x_dtype=np.float16  # <--- dùng float16 để giảm RAM (tùy bạn)
+)
+
+print("Building per-user test tensors...")
+test_user_ids, X_test_users, y_test_users, test_idx_user, test_idx_pos = build_user_tensors(
+    test, feature_cols, mean, std, x_dtype=np.float16
+)
+
+train_ds = WindowDataset(X_train_users, y_train_users, train_idx_user, train_idx_pos,
+                         memory_size=MEMORY_SIZE, pad_mode="repeat_first")
+test_ds  = WindowDataset(X_test_users,  y_test_users,  test_idx_user,  test_idx_pos,
+                         memory_size=MEMORY_SIZE, pad_mode="repeat_first")
+
+print("Total train samples:", len(train_ds))
+print("Total test samples :", len(test_ds))
 
 # =======================================================
-# 8) SAVE TO .pt
+# 8) SAVE LIGHT CACHE (NO BIG (N,M,F))
 # =======================================================
-print(f"Saving to {SAVE_PATH} ...")
-
+print(f"Saving lightweight cache to {SAVE_PATH} ...")
 cache = {
     "memory_size": MEMORY_SIZE,
     "feature_cols": feature_cols,
     "mean": torch.tensor(mean, dtype=torch.float32),
     "std": torch.tensor(std, dtype=torch.float32),
 
-    "X_train_seq": torch.tensor(X_train_seq, dtype=torch.float32),
-    "y_train_seq": torch.tensor(y_train_seq, dtype=torch.float32),
+    # store per-user tensors (much smaller than full sequences)
+    "X_train_users": X_train_users,
+    "y_train_users": y_train_users,
+    "train_idx_user": torch.from_numpy(train_idx_user),
+    "train_idx_pos": torch.from_numpy(train_idx_pos),
 
-    "X_test_seq":  torch.tensor(X_test_seq, dtype=torch.float32),
-    "y_test_seq":  torch.tensor(y_test_seq, dtype=torch.float32),
+    "X_test_users": X_test_users,
+    "y_test_users": y_test_users,
+    "test_idx_user": torch.from_numpy(test_idx_user),
+    "test_idx_pos": torch.from_numpy(test_idx_pos),
 }
-
 torch.save(cache, SAVE_PATH)
 
+import os
 file_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
 print(f"Saved: {SAVE_PATH} ({file_size_mb:.2f} MB)")
 print("Done.")
+
